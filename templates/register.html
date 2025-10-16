@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}Cadastro - Portal ALLUPRO{% endblock %}
+
+{% block content %}
+<div class="login-container">
+    <div class="container">
+        <div class="row justify-content-center">
+            <div class="col-md-6 col-lg-5">
+                <div class="login-card">
+                    <div class="login-header">
+                        <h3><i class="bi bi-person-plus"></i> Criar Conta</h3>
+                        <p class="mb-0">Portal ALLUPRO</p>
+                    </div>
+                    
+                    <div class="login-body">
+                        <form method="POST">
+                            <div class="mb-3">
+                                <label for="nome" class="form-label">
+                                    <i class="bi bi-person"></i> Nome Completo
+                                </label>
+                                <input type="text" class="form-control" id="nome" name="nome" required>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="email" class="form-label">
+                                    <i class="bi bi-envelope"></i> Email
+                                </label>
+                                <input type="email" class="form-control" id="email" name="email" required>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="senha" class="form-label">
+                                    <i class="bi bi-lock"></i> Senha
+                                </label>
+                                <input type="password" class="form-control" id="senha" name="senha" required minlength="6">
+                                <div class="form-text">Mínimo 6 caracteres</div>
+                            </div>
+                            
+                            <div class="d-grid">
+                                <button type="submit" class="btn btn-primary btn-modern">
+                                    <i class="bi bi-person-check"></i> Criar Conta
+                                </button>
+                            </div>
+                        </form>
+                        
+                        <hr class="my-4">
+                        
+                        <div class="text-center">
+                            <p class="mb-0">Já tem uma conta?</p>
+                            <a href="{{ url_for('login') }}" class="btn btn-outline-primary btn-sm mt-2">
+                                <i class="bi bi-box-arrow-in-right"></i> Fazer Login
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
