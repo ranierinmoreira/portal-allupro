@@ -1,367 +1,404 @@
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for, flash
-import sqlite3
-import re
-import hashlib
 import os
-from datetime import datetime
+from flask import Flask, request, jsonify, session
+from flask_cors import CORS
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import hashlib
 from functools import wraps
 
 app = Flask(__name__)
-app.secret_key = '1234567890'
+CORS(app, origins=["http://localhost:4200"], supports_credentials=True)
+app.secret_key = 'portal-allupro-secret-key-2025'
 
-# Configuração do banco de dados
-DATABASE = 'portal_allupro.db'
+DATABASE_URL = os.environ.get(
+    'DATABASE_URL',
+    'postgresql://postgres:postgres@localhost:5432/portal_allupro'
+)
+
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+
 
 def init_db():
-    """Inicializa o banco de dados com as tabelas necessárias"""
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-    
-    # Tabela de usuários
-    cursor.execute('''
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute('''
         CREATE TABLE IF NOT EXISTS usuarios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            senha TEXT NOT NULL,
-            tipo_usuario TEXT DEFAULT 'cliente',
+            id SERIAL PRIMARY KEY,
+            nome VARCHAR(255) NOT NULL,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            senha VARCHAR(255) NOT NULL,
+            tipo_usuario VARCHAR(50) DEFAULT 'cliente',
             data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    # Tabela de projetos
-    cursor.execute('''
+
+    cur.execute('''
         CREATE TABLE IF NOT EXISTS projetos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT NOT NULL,
+            id SERIAL PRIMARY KEY,
+            nome VARCHAR(255) NOT NULL,
             descricao TEXT,
             cliente_id INTEGER,
-            tipo_projeto TEXT NOT NULL,
-            status TEXT DEFAULT 'ativo',
+            tipo_projeto VARCHAR(100) NOT NULL,
+            status VARCHAR(50) DEFAULT 'ativo',
             data_inicio DATE,
             data_prevista DATE,
-            valor_estimado REAL,
+            valor_estimado DECIMAL(12, 2),
             observacoes TEXT,
             data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (cliente_id) REFERENCES usuarios (id)
         )
     ''')
-    
-    # Tabela de materiais
-    cursor.execute('''
+
+    cur.execute('''
         CREATE TABLE IF NOT EXISTS materiais (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT NOT NULL,
-            tipo_material TEXT NOT NULL,
+            id SERIAL PRIMARY KEY,
+            nome VARCHAR(255) NOT NULL,
+            tipo_material VARCHAR(100) NOT NULL,
             especificacoes TEXT,
-            preco_unitario REAL,
+            preco_unitario DECIMAL(12, 2),
             estoque_atual INTEGER DEFAULT 0,
-            unidade_medida TEXT DEFAULT 'un',
-            fornecedor TEXT,
+            unidade_medida VARCHAR(20) DEFAULT 'un',
+            fornecedor VARCHAR(255),
             data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    # Tabela de itens do projeto
-    cursor.execute('''
+
+    cur.execute('''
         CREATE TABLE IF NOT EXISTS projeto_materiais (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             projeto_id INTEGER,
             material_id INTEGER,
             quantidade INTEGER NOT NULL,
-            preco_unitario REAL,
-            subtotal REAL,
+            preco_unitario DECIMAL(12, 2),
+            subtotal DECIMAL(12, 2),
             FOREIGN KEY (projeto_id) REFERENCES projetos (id),
             FOREIGN KEY (material_id) REFERENCES materiais (id)
         )
     ''')
-    
+
     conn.commit()
+    cur.close()
     conn.close()
+
+
+def get_db():
+    return get_conn()
+
 
 def login_required(f):
-    """Decorator para rotas que requerem login"""
     @wraps(f)
-    def decorated_function(*args, **kwargs):
+    def decorated(*args, **kwargs):
         if 'user_id' not in session:
-            return redirect(url_for('login'))
+            return jsonify({'error': 'Não autenticado'}), 401
         return f(*args, **kwargs)
-    return decorated_function
+    return decorated
 
-def get_db_connection():
-    """Cria conexão com o banco de dados"""
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    return conn
 
-# ==================== ROTAS PRINCIPAIS ====================
+# ==================== AUTH API ====================
 
-@app.route('/')
-def index():
-    """Página inicial"""
-    if 'user_id' in session:
-        return redirect(url_for('dashboard'))
-    return render_template('login.html')
-
-@app.route('/login', methods=['GET', 'POST'])
+@app.route('/api/login', methods=['POST'])
 def login():
-    """Página de login"""
-    if request.method == 'POST':
-        email = request.form['email']
-        senha = hashlib.sha256(request.form['senha'].encode()).hexdigest()
-        
-        conn = get_db_connection()
-        user = conn.execute(
-            'SELECT * FROM usuarios WHERE email = ? AND senha = ?',
-            (email, senha)
-        ).fetchone()
-        conn.close()
-        
-        if user:
-            session['user_id'] = user['id']
-            session['user_name'] = user['nome']
-            session['user_type'] = user['tipo_usuario']
-            flash('Login realizado com sucesso!', 'success')
-            return redirect(url_for('dashboard'))
-        else:
-            flash('Email ou senha incorretos!', 'error')
-    
-    return render_template('login.html')
+    data = request.get_json()
+    if not data or 'email' not in data or 'senha' not in data:
+        return jsonify({'success': False, 'error': 'Email e senha são obrigatórios'}), 400
 
-@app.route('/register', methods=['GET', 'POST'])
+    senha_hash = hashlib.sha256(data['senha'].encode()).hexdigest()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT * FROM usuarios WHERE email = %s AND senha = %s',
+        (data['email'], senha_hash)
+    )
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if user:
+        session['user_id'] = user['id']
+        session['user_name'] = user['nome']
+        session['user_type'] = user['tipo_usuario']
+        return jsonify({
+            'success': True,
+            'user': {
+                'id': user['id'],
+                'nome': user['nome'],
+                'email': user['email'],
+                'tipo_usuario': user['tipo_usuario']
+            }
+        })
+    return jsonify({'success': False, 'error': 'Email ou senha incorretos'}), 401
+
+
+@app.route('/api/register', methods=['POST'])
 def register():
-    """Página de cadastro"""
-    if request.method == 'POST':
-        nome = request.form['nome']
-        email = request.form['email']
-        senha = hashlib.sha256(request.form['senha'].encode()).hexdigest()
-        
-        conn = get_db_connection()
-        try:
-            conn.execute(
-                'INSERT INTO usuarios (nome, email, senha) VALUES (?, ?, ?)',
-                (nome, email, senha)
-            )
-            conn.commit()
-            flash('Usuário cadastrado com sucesso!', 'success')
-            return redirect(url_for('login'))
-        except sqlite3.IntegrityError:
-            flash('Email já cadastrado!', 'error')
-        finally:
-            conn.close()
-    
-    return render_template('register.html')
+    data = request.get_json()
+    if not data or 'nome' not in data or 'email' not in data or 'senha' not in data:
+        return jsonify({'success': False, 'error': 'Nome, email e senha são obrigatórios'}), 400
 
-@app.route('/logout')
+    senha_hash = hashlib.sha256(data['senha'].encode()).hexdigest()
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            'INSERT INTO usuarios (nome, email, senha) VALUES (%s, %s, %s) RETURNING id',
+            (data['nome'], data['email'], senha_hash)
+        )
+        user_id = cur.fetchone()['id']
+        conn.commit()
+        session['user_id'] = user_id
+        session['user_name'] = data['nome']
+        session['user_type'] = 'cliente'
+        cur.close()
+        conn.close()
+        return jsonify({
+            'success': True,
+            'user': {
+                'id': user_id,
+                'nome': data['nome'],
+                'email': data['email'],
+                'tipo_usuario': 'cliente'
+            }
+        }), 201
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return jsonify({'success': False, 'error': 'Email já cadastrado'}), 400
+
+
+@app.route('/api/logout', methods=['POST'])
 def logout():
-    """Logout do usuário"""
     session.clear()
-    flash('Logout realizado com sucesso!', 'info')
-    return redirect(url_for('login'))
+    return jsonify({'success': True})
 
-@app.route('/dashboard')
+
+@app.route('/api/auth/check', methods=['GET'])
+def check_auth():
+    if 'user_id' in session:
+        return jsonify({
+            'authenticated': True,
+            'user': {
+                'id': session['user_id'],
+                'nome': session['user_name'],
+                'tipo_usuario': session.get('user_type', 'cliente')
+            }
+        })
+    return jsonify({'authenticated': False}), 401
+
+
+# ==================== DASHBOARD API ====================
+
+@app.route('/api/dashboard', methods=['GET'])
 @login_required
 def dashboard():
-    """Dashboard principal"""
-    conn = get_db_connection()
-    
-    # Estatísticas gerais
-    total_projetos = conn.execute('SELECT COUNT(*) as total FROM projetos').fetchone()['total']
-    projetos_ativos = conn.execute("SELECT COUNT(*) as total FROM projetos WHERE status = 'ativo'").fetchone()['total']
-    total_materiais = conn.execute('SELECT COUNT(*) as total FROM materiais').fetchone()['total']
-    
-    # Projetos recentes
-    projetos_recentes = conn.execute('''
-        SELECT p.*, u.nome as cliente_nome 
-        FROM projetos p 
-        LEFT JOIN usuarios u ON p.cliente_id = u.id 
-        ORDER BY p.data_criacao DESC 
-        LIMIT 5
-    ''').fetchall()
-    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) as c FROM projetos')
+    total_projetos = cur.fetchone()['c']
+    cur.execute("SELECT COUNT(*) as c FROM projetos WHERE status = 'ativo'")
+    projetos_ativos = cur.fetchone()['c']
+    cur.execute('SELECT COUNT(*) as c FROM materiais')
+    total_materiais = cur.fetchone()['c']
+    cur.execute('''
+        SELECT p.*, u.nome as cliente_nome FROM projetos p
+        LEFT JOIN usuarios u ON p.cliente_id = u.id
+        ORDER BY p.data_criacao DESC LIMIT 5
+    ''')
+    projetos_recentes = cur.fetchall()
+    cur.close()
     conn.close()
-    
-    return render_template('dashboard.html', 
-                         total_projetos=total_projetos,
-                         projetos_ativos=projetos_ativos,
-                         total_materiais=total_materiais,
-                         projetos_recentes=projetos_recentes)
 
-# ==================== API DE PROJETOS ====================
+    return jsonify({
+        'total_projetos': total_projetos,
+        'projetos_ativos': projetos_ativos,
+        'total_materiais': total_materiais,
+        'projetos_recentes': [dict(r) for r in projetos_recentes]
+    })
+
+
+# ==================== PROJETOS API ====================
 
 @app.route('/api/projetos', methods=['GET'])
 @login_required
 def get_projetos():
-    """API para listar projetos"""
-    conn = get_db_connection()
-    projetos = conn.execute('''
-        SELECT p.*, u.nome as cliente_nome 
-        FROM projetos p 
-        LEFT JOIN usuarios u ON p.cliente_id = u.id 
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT p.*, u.nome as cliente_nome FROM projetos p
+        LEFT JOIN usuarios u ON p.cliente_id = u.id
         ORDER BY p.data_criacao DESC
-    ''').fetchall()
+    ''')
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
-    
-    return jsonify([dict(projeto) for projeto in projetos])
+    return jsonify([dict(r) for r in rows])
+
 
 @app.route('/api/projetos', methods=['POST'])
 @login_required
 def criar_projeto():
-    """API para criar novo projeto"""
     data = request.get_json()
-    
-    conn = get_db_connection()
+    if not data or 'nome' not in data or 'tipo_projeto' not in data:
+        return jsonify({'success': False, 'error': 'Nome e tipo são obrigatórios'}), 400
+
+    conn = get_db()
+    cur = conn.cursor()
     try:
-        cursor = conn.execute('''
+        cur.execute('''
             INSERT INTO projetos (nome, descricao, cliente_id, tipo_projeto, data_inicio, data_prevista, valor_estimado, observacoes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
         ''', (
-            data['nome'], data['descricao'], data.get('cliente_id'), 
+            data['nome'], data.get('descricao'), data.get('cliente_id'),
             data['tipo_projeto'], data.get('data_inicio'), data.get('data_prevista'),
             data.get('valor_estimado'), data.get('observacoes')
         ))
+        pid = cur.fetchone()['id']
         conn.commit()
-        projeto_id = cursor.lastrowid
+        cur.close()
         conn.close()
-        
-        return jsonify({'success': True, 'id': projeto_id}), 201
+        return jsonify({'success': True, 'id': pid}), 201
     except Exception as e:
+        conn.rollback()
+        cur.close()
         conn.close()
         return jsonify({'success': False, 'error': str(e)}), 400
 
-@app.route('/api/projetos/<int:projeto_id>', methods=['PUT'])
+
+@app.route('/api/projetos/<int:id>', methods=['PUT'])
 @login_required
-def atualizar_projeto(projeto_id):
-    """API para atualizar projeto"""
+def atualizar_projeto(id):
     data = request.get_json()
-    
-    conn = get_db_connection()
+    conn = get_db()
+    cur = conn.cursor()
     try:
-        conn.execute('''
-            UPDATE projetos 
-            SET nome = ?, descricao = ?, tipo_projeto = ?, status = ?, 
-                data_inicio = ?, data_prevista = ?, valor_estimado = ?, observacoes = ?
-            WHERE id = ?
+        cur.execute('''
+            UPDATE projetos SET nome=%s, descricao=%s, tipo_projeto=%s, status=%s, data_inicio=%s, data_prevista=%s, valor_estimado=%s, observacoes=%s
+            WHERE id=%s
         ''', (
-            data['nome'], data['descricao'], data['tipo_projeto'], data['status'],
-            data.get('data_inicio'), data.get('data_prevista'), data.get('valor_estimado'),
-            data.get('observacoes'), projeto_id
+            data.get('nome'), data.get('descricao'), data.get('tipo_projeto'),
+            data.get('status'), data.get('data_inicio'), data.get('data_prevista'),
+            data.get('valor_estimado'), data.get('observacoes'), id
         ))
         conn.commit()
+        cur.close()
         conn.close()
-        
-        return jsonify({'success': True}), 200
+        return jsonify({'success': True})
     except Exception as e:
+        conn.rollback()
+        cur.close()
         conn.close()
         return jsonify({'success': False, 'error': str(e)}), 400
 
-@app.route('/api/projetos/<int:projeto_id>', methods=['DELETE'])
+
+@app.route('/api/projetos/<int:id>', methods=['DELETE'])
 @login_required
-def deletar_projeto(projeto_id):
-    """API para deletar projeto"""
-    conn = get_db_connection()
+def deletar_projeto(id):
+    conn = get_db()
+    cur = conn.cursor()
     try:
-        conn.execute('DELETE FROM projetos WHERE id = ?', (projeto_id,))
+        cur.execute('DELETE FROM projetos WHERE id=%s', (id,))
         conn.commit()
+        cur.close()
         conn.close()
-        
-        return jsonify({'success': True}), 200
+        return jsonify({'success': True})
     except Exception as e:
+        conn.rollback()
+        cur.close()
         conn.close()
         return jsonify({'success': False, 'error': str(e)}), 400
 
-# ==================== API DE MATERIAIS ====================
+
+# ==================== MATERIAIS API ====================
 
 @app.route('/api/materiais', methods=['GET'])
 @login_required
 def get_materiais():
-    """API para listar materiais"""
-    conn = get_db_connection()
-    materiais = conn.execute('SELECT * FROM materiais ORDER BY nome').fetchall()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('SELECT * FROM materiais ORDER BY nome')
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
-    
-    return jsonify([dict(material) for material in materiais])
+    return jsonify([dict(r) for r in rows])
+
 
 @app.route('/api/materiais', methods=['POST'])
 @login_required
 def criar_material():
-    """API para criar novo material"""
     data = request.get_json()
-    
-    conn = get_db_connection()
+    if not data or 'nome' not in data or 'tipo_material' not in data:
+        return jsonify({'success': False, 'error': 'Nome e tipo são obrigatórios'}), 400
+
+    conn = get_db()
+    cur = conn.cursor()
     try:
-        cursor = conn.execute('''
+        cur.execute('''
             INSERT INTO materiais (nome, tipo_material, especificacoes, preco_unitario, estoque_atual, unidade_medida, fornecedor)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
         ''', (
             data['nome'], data['tipo_material'], data.get('especificacoes'),
             data.get('preco_unitario'), data.get('estoque_atual', 0),
             data.get('unidade_medida', 'un'), data.get('fornecedor')
         ))
+        mid = cur.fetchone()['id']
         conn.commit()
-        material_id = cursor.lastrowid
+        cur.close()
         conn.close()
-        
-        return jsonify({'success': True, 'id': material_id}), 201
+        return jsonify({'success': True, 'id': mid}), 201
     except Exception as e:
+        conn.rollback()
+        cur.close()
         conn.close()
         return jsonify({'success': False, 'error': str(e)}), 400
 
-@app.route('/api/materiais/<int:material_id>', methods=['PUT'])
+
+@app.route('/api/materiais/<int:id>', methods=['PUT'])
 @login_required
-def atualizar_material(material_id):
-    """API para atualizar material"""
+def atualizar_material(id):
     data = request.get_json()
-    
-    conn = get_db_connection()
+    conn = get_db()
+    cur = conn.cursor()
     try:
-        conn.execute('''
-            UPDATE materiais 
-            SET nome = ?, tipo_material = ?, especificacoes = ?, preco_unitario = ?,
-                estoque_atual = ?, unidade_medida = ?, fornecedor = ?
-            WHERE id = ?
+        cur.execute('''
+            UPDATE materiais SET nome=%s, tipo_material=%s, especificacoes=%s, preco_unitario=%s, estoque_atual=%s, unidade_medida=%s, fornecedor=%s
+            WHERE id=%s
         ''', (
-            data['nome'], data['tipo_material'], data.get('especificacoes'),
+            data.get('nome'), data.get('tipo_material'), data.get('especificacoes'),
             data.get('preco_unitario'), data.get('estoque_atual'),
-            data.get('unidade_medida'), data.get('fornecedor'), material_id
+            data.get('unidade_medida', 'un'), data.get('fornecedor'), id
         ))
         conn.commit()
+        cur.close()
         conn.close()
-        
-        return jsonify({'success': True}), 200
+        return jsonify({'success': True})
     except Exception as e:
+        conn.rollback()
+        cur.close()
         conn.close()
         return jsonify({'success': False, 'error': str(e)}), 400
 
-@app.route('/api/materiais/<int:material_id>', methods=['DELETE'])
+
+@app.route('/api/materiais/<int:id>', methods=['DELETE'])
 @login_required
-def deletar_material(material_id):
-    """API para deletar material"""
-    conn = get_db_connection()
+def deletar_material(id):
+    conn = get_db()
+    cur = conn.cursor()
     try:
-        conn.execute('DELETE FROM materiais WHERE id = ?', (material_id,))
+        cur.execute('DELETE FROM materiais WHERE id=%s', (id,))
         conn.commit()
+        cur.close()
         conn.close()
-        
-        return jsonify({'success': True}), 200
+        return jsonify({'success': True})
     except Exception as e:
+        conn.rollback()
+        cur.close()
         conn.close()
         return jsonify({'success': False, 'error': str(e)}), 400
 
-# ==================== PÁGINAS ====================
-
-@app.route('/projetos')
-@login_required
-def projetos_page():
-    """Página de gerenciamento de projetos"""
-    return render_template('projetos.html')
-
-@app.route('/materiais')
-@login_required
-def materiais_page():
-    """Página de gerenciamento de materiais"""
-    return render_template('materiais.html')
 
 if __name__ == '__main__':
     init_db()
-    app.run(debug=True)
+    app.run(debug=True, port=5000)
